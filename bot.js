@@ -92,6 +92,31 @@ async function syncStructuredMemoryToTelegram(userId, userName) {
     }
 }
 
+// 🎉 NEW MEMBER WELCOME HANDLER
+bot.on('new_chat_members', async (ctx) => {
+    try {
+        const newMembers = ctx.message.new_chat_members;
+
+        for (const member of newMembers) {
+            // Agar bot khud add hua hai toh ignore karega
+            if (member.is_bot && member.username === 'three_dimen_group_bot') continue;
+
+            const memberName = member.first_name || 'Artist';
+
+            // Custom Welcome Message
+            const welcomeText = 
+                `Welcome to the group, ${memberName}! 🎉\n\n` +
+                `Main hu **Danish** (@three_dimen_group_bot), tumhara Group Manager. ` +
+                `Ye 3D Artists ka community space hai jahan hum Blender, Texturing, Animation aur Scripting discuss karte hain.\n\n` +
+                `Apna intro do aur batao kis 3D software pe kaam kar rahe ho! 🚀`;
+
+            await ctx.reply(welcomeText, { reply_to_message_id: ctx.message.message_id });
+        }
+    } catch (err) {
+        console.error("❌ Welcome Handler Error:", err.message);
+    }
+});
+
 bot.on('text', async (ctx) => {
     if (ctx.message.text.startsWith('/')) return;
 
