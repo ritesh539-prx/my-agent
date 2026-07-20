@@ -4,6 +4,7 @@ const Groq = require('groq-sdk');
 const express = require('express');
 
 const RITESH_PERSONAL_CHAT_ID = '6846541775';
+const BOT_USERNAME = 'three_dimen_group_bot'; // no @
 
 const BOT_TOKEN = process.env.TELE_BOT_KEY ? process.env.TELE_BOT_KEY.replace(/\\r|\\n/g, '').trim() : null;
 const GROQ_API_KEY = process.env.GROQ_API_KEY ? process.env.GROQ_API_KEY.replace(/\\r|\\n/g, '').trim() : null;
@@ -22,29 +23,31 @@ app.get('/', (req, res) => res.send('Autonomous Memory & Chat Engine Active! �
 app.listen(PORT, () => console.log(`📡 Health-check active on port ${PORT}`));
 
 // Storage & Memory Structures
-const userCoreMemory = {};       
-const userRecentChats = {};        
-const userFreshMemory = {};        
-const memoryMessageTracker = {}; 
+const userCoreMemory = {};
+const userRecentChats = {};
+const userFreshMemory = {};
+const memoryMessageTracker = {};
 
 // Message Buffer for 5-Second Interval Processing
-let chatBuffer = []; 
+let chatBuffer = [];
+let botTelegramId = null; // filled after launch
 
-// 🧠 AUTONOMOUS BATCH ENGINE INSTRUCTION
 // 🧠 AUTONOMOUS BATCH ENGINE INSTRUCTION (DYNAMIC LANGUAGE ADAPTATION)
-const ENGINE_INSTRUCTION = 
-    `You are 'Danish' (@three_dimen_group_bot), the intelligent Group Manager of a 3D Artist Telegram Community.\n` +
+const ENGINE_INSTRUCTION =
+    `You are 'Danish' (@three_dimen_group_bot), the friendly Group Manager of a 3D Artist Telegram Community.\n` +
     `You are reading a recent batch of raw chat messages from the group.\n\n` +
     `YOUR TWO CORE DUTIES:\n` +
     `1. MEMORY ANALYSIS: Analyze what users are discussing, their active interests, questions, or context, and extract insights for each user.\n` +
     `2. CONVERSATIONAL JUDGMENT: Decide if you should chime into the chat.\n` +
-    `   - Set "should_respond": true ONLY IF someone directly addressed you, mentioned you, asked a question relevant to group/3D/Blender, or if a natural entry point exists where a chill friend would chime in.\n` +
+    `   - Set "should_respond": true if someone directly addressed you, mentioned you, replied to you (marked with [REPLYING_TO_DANISH]), asked ANY question (3D-related or not), greeted you personally, or made small talk directed at you.\n` +
+    `   - Also feel free to reply true for general friendly banter where a chill community manager would naturally jump in — you don't have to restrict yourself to only 3D/Blender topics. You can have normal casual conversations too, not just technical ones.\n` +
+    `   - Any message tagged [REPLYING_TO_DANISH] or [MENTIONS_DANISH] MUST get "should_respond": true.\n` +
     `   - Otherwise set "should_respond": false.\n\n` +
     `🚨 LANGUAGE & TONE LAWS (STRICT MATCHING):\n` +
     `- MATCH THE USER'S LANGUAGE: If the user speaks in English, reply strictly in clean, professional yet casual English. If they speak in Hinglish, reply in natural Indian Hinglish.\n` +
     `- NEVER force Hinglish or Hindi words on an English-speaking user.\n` +
-    `- Direct, relevant, short, concise. Never use generic or robotic filler.\n` +
-    `- Keep persona as 'Danish' (chill, knowledgeable 3D community manager).\n\n` +
+    `- Direct, relevant, short, concise, human. Never use generic or robotic filler.\n` +
+    `- Keep persona as 'Danish' (chill, knowledgeable, friendly 3D community manager who also enjoys casual chit-chat).\n\n` +
     `OUTPUT FORMAT REQUIREMENTS:\n` +
     `Return ONLY a JSON object with this exact structure:\n` +
     `{\n` +
@@ -60,7 +63,7 @@ const ENGINE_INSTRUCTION =
     `  "target_message_id": "message_id_to_reply_to_if_any_else_null",\n` +
     `  "response_text": "Your adaptive language reply here"\n` +
     `}`;
-    
+
 async function syncStructuredMemoryToTelegram(userId, userName) {
     try {
         const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
@@ -78,7 +81,7 @@ async function syncStructuredMemoryToTelegram(userId, userName) {
             .map(item => `${item.sender}: ${item.text}`)
             .join('\n');
 
-        const payload = 
+        const payload =
             `🧠 [LIVE USER PROFILE & CONTEXT CARD]\n` +
             `👤 User: ${userName} (ID: ${userId})\n` +
             `⏰ Last Sync: ${timestamp}\n\n` +
@@ -98,11 +101,11 @@ bot.on('new_chat_members', async (ctx) => {
     try {
         const newMembers = ctx.message.new_chat_members;
         for (const member of newMembers) {
-            if (member.is_bot && member.username === 'three_dimen_group_bot') continue;
+            if (member.is_bot && member.username === BOT_USERNAME) continue;
             const memberName = member.first_name || 'Artist';
-            const welcomeText = 
+            const welcomeText =
                 `Welcome to the group, ${memberName}! 🎉\n\n` +
-                `Main hu **Danish** (@three_dimen_group_bot), tumhara Group Manager. ` +
+                `Main hu **Danish** (@${BOT_USERNAME}), tumhara Group Manager. ` +
                 `Ye 3D Artists ka community space hai jahan hum Blender, Texturing, Animation aur Scripting discuss karte hain.\n\n` +
                 `Apna intro do aur batao kis 3D software pe kaam kar rahe ho! 🚀`;
 
@@ -123,6 +126,18 @@ bot.on('text', async (ctx) => {
     const msgId = ctx.message.message_id;
     const chatId = ctx.chat.id;
 
+    // --- NEW: detect if this message is a reply to the bot itself ---
+    const isReplyToBot =
+        ctx.message.reply_to_message &&
+        ctx.message.reply_to_message.from &&
+        (ctx.message.reply_to_message.from.id === botTelegramId ||
+         ctx.message.reply_to_message.from.username === BOT_USERNAME);
+
+    // --- NEW: detect @mention or plain "Danish" name-drop ---
+    const mentionsBot =
+        rawMessage.toLowerCase().includes(`@${BOT_USERNAME.toLowerCase()}`) ||
+        /\bdanish\b/i.test(rawMessage);
+
     // Initialize structures
     if (!userCoreMemory[userId]) userCoreMemory[userId] = `${userName} joined group conversations.`;
     if (!userRecentChats[userId]) userRecentChats[userId] = [];
@@ -132,13 +147,15 @@ bot.on('text', async (ctx) => {
     userRecentChats[userId].push({ sender: userName, text: rawMessage });
     if (userRecentChats[userId].length > 15) userRecentChats[userId].shift();
 
-    // Push into global 5-second buffer queue
+    // Push into global 5-second buffer queue (now carries reply/mention flags)
     chatBuffer.push({
         chatId,
         msgId,
         userId,
         userName,
         text: rawMessage,
+        isReplyToBot,
+        mentionsBot,
         time: new Date().toLocaleTimeString('en-IN')
     });
 });
@@ -151,11 +168,18 @@ setInterval(async () => {
     const currentBatch = [...chatBuffer];
     chatBuffer = [];
 
-    try {
-        const formattedBatchText = currentBatch.map(m => 
-            `[MsgID: ${m.msgId} | UserID: ${m.userId} | ${m.userName}]: "${m.text}"`
-        ).join('\n');
+    // --- NEW: if any message directly targets the bot, force-flag it in the payload ---
+    const formattedBatchText = currentBatch.map(m => {
+        let tags = '';
+        if (m.isReplyToBot) tags += ' [REPLYING_TO_DANISH]';
+        if (m.mentionsBot) tags += ' [MENTIONS_DANISH]';
+        return `[MsgID: ${m.msgId} | UserID: ${m.userId} | ${m.userName}]${tags}: "${m.text}"`;
+    }).join('\n');
 
+    // --- NEW: hard override — if a direct reply/mention exists, don't fully trust the LLM's should_respond ---
+    const hasDirectAddress = currentBatch.some(m => m.isReplyToBot || m.mentionsBot);
+
+    try {
         const promptPayload = `CURRENT CHAT BATCH (Last 5 seconds):\n${formattedBatchText}`;
 
         const completion = await groq.chat.completions.create({
@@ -164,7 +188,7 @@ setInterval(async () => {
                 { role: 'user', content: promptPayload }
             ],
             model: 'llama-3.1-8b-instant',
-            temperature: 0.3,
+            temperature: 0.4,
             response_format: { type: "json_object" }
         });
 
@@ -184,11 +208,13 @@ setInterval(async () => {
             }
         }
 
-        // 2. CONVERSATIONAL REPLY IF DECIDED BY AI
-        if (data.should_respond && data.response_text) {
+        // 2. CONVERSATIONAL REPLY IF DECIDED BY AI (or forced by direct address)
+        const shouldRespond = data.should_respond || hasDirectAddress;
+
+        if (shouldRespond && data.response_text) {
             const targetChatId = currentBatch[0].chatId;
-            const replyMsgId = data.target_message_id && data.target_message_id !== "null" 
-                ? parseInt(data.target_message_id) 
+            const replyMsgId = data.target_message_id && data.target_message_id !== "null"
+                ? parseInt(data.target_message_id)
                 : currentBatch[currentBatch.length - 1].msgId;
 
             await bot.telegram.sendMessage(targetChatId, data.response_text, {
@@ -201,6 +227,15 @@ setInterval(async () => {
     }
 }, 5000);
 
-bot.launch().then(() => console.log("🚀 Autonomous 5s Batch Memory Engine Active...")).catch(err => console.error("❌ Launch Failed:", err.message));
+bot.launch().then(async () => {
+    console.log("🚀 Autonomous 5s Batch Memory Engine Active...");
+    try {
+        const me = await bot.telegram.getMe();
+        botTelegramId = me.id;
+    } catch (e) {
+        console.error("❌ Could not fetch bot identity:", e.message);
+    }
+}).catch(err => console.error("❌ Launch Failed:", err.message));
+
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
