@@ -289,3 +289,4 @@ startBot().catch(err => console.error("❌ Launch Failed:", err.message));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+console.log("hello ji");
