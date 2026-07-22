@@ -2,17 +2,35 @@ require('dotenv').config();
 const { Telegraf } = require('telegraf');
 const Groq = require('groq-sdk');
 const express = require('express');
+const mongoose = require('mongoose');
 
 const RITESH_PERSONAL_CHAT_ID = '6846541775';
 const BOT_USERNAME = 'three_dimen_group_bot'; // no @
 
 const BOT_TOKEN = process.env.TELE_BOT_KEY ? process.env.TELE_BOT_KEY.replace(/\\r|\\n/g, '').trim() : null;
 const GROQ_API_KEY = process.env.GROQ_API_KEY ? process.env.GROQ_API_KEY.replace(/\\r|\\n/g, '').trim() : null;
+const MONGODB_URI = process.env.MONGODB_URI ? process.env.MONGODB_URI.trim() : null;
 
 if (!BOT_TOKEN || !GROQ_API_KEY) {
     console.error("❌ ERROR: Keys are missing in .env!");
     process.exit(1);
 }
+if (!MONGODB_URI) {
+    console.error("❌ ERROR: MONGODB_URI is missing in .env! Data won't persist across restarts.");
+    process.exit(1);
+}
+
+// --- NEW: Mongo schema for per-user persistent memory ---
+const userMemorySchema = new mongoose.Schema({
+    userId: { type: String, required: true, unique: true, index: true },
+    userName: { type: String, default: 'User' },
+    coreStory: { type: String, default: '' },
+    freshMemory: { type: String, default: '' },
+    recentChats: { type: [{ sender: String, text: String }], default: [] },
+    memoryMessageId: { type: Number, default: null } // last DM sync message id in Ritesh's chat
+}, { timestamps: true });
+
+const UserMemory = mongoose.model('UserMemory', userMemorySchema);
 
 const bot = new Telegraf(BOT_TOKEN);
 const groq = new Groq({ apiKey: GROQ_API_KEY });
@@ -32,12 +50,44 @@ const memoryMessageTracker = {};
 let chatBuffer = [];
 let botTelegramId = null; // filled after launch
 
+// --- NEW: load all existing user memory from MongoDB into RAM on boot ---
+async function loadMemoryFromDB() {
+    const allUsers = await UserMemory.find({});
+    for (const doc of allUsers) {
+        userCoreMemory[doc.userId] = doc.coreStory || `${doc.userName} joined group conversations.`;
+        userFreshMemory[doc.userId] = doc.freshMemory || "Active in group chats.";
+        userRecentChats[doc.userId] = doc.recentChats || [];
+        if (doc.memoryMessageId) memoryMessageTracker[doc.userId] = doc.memoryMessageId;
+    }
+    console.log(`📦 Loaded memory for ${allUsers.length} user(s) from MongoDB.`);
+}
+
+// --- NEW: upsert a single user's memory into MongoDB (called after every update) ---
+async function persistUserMemory(userId, userName) {
+    try {
+        await UserMemory.findOneAndUpdate(
+            { userId: String(userId) },
+            {
+                userId: String(userId),
+                userName: userName || 'User',
+                coreStory: userCoreMemory[userId] || '',
+                freshMemory: userFreshMemory[userId] || '',
+                recentChats: userRecentChats[userId] || [],
+                memoryMessageId: memoryMessageTracker[userId] || null
+            },
+            { upsert: true, new: true }
+        );
+    } catch (err) {
+        console.error("❌ Mongo persist error:", err.message);
+    }
+}
+
 // 🧠 AUTONOMOUS BATCH ENGINE INSTRUCTION (DYNAMIC LANGUAGE ADAPTATION)
 const ENGINE_INSTRUCTION =
     `You are 'Danish' (@three_dimen_group_bot), the friendly Group Manager of a 3D Artist Telegram Community.\n` +
     `You are reading a recent batch of raw chat messages from the group.\n\n` +
     `YOUR TWO CORE DUTIES:\n` +
-    `1. MEMORY ANALYSIS: Analyze what users are discussing, their active interests, questions, or context, and extract insights for each user.\n` +
+    `1. MEMORY ANALYSIS: Each user is uniquely identified by their Telegram "userId" (not name — names can repeat). You will be shown their EXISTING core_story and fresh_memory for that exact userId. UPDATE and MERGE new info into the existing core_story — never discard prior known facts about that userId unless the new message contradicts them. Think of it as editing a running profile, not rewriting it from zero.\n` +
     `2. CONVERSATIONAL JUDGMENT: Decide if you should chime into the chat.\n` +
     `   - Set "should_respond": true if someone directly addressed you, mentioned you, replied to you (marked with [REPLYING_TO_DANISH]), asked ANY question (3D-related or not), greeted you personally, or made small talk directed at you.\n` +
     `   - Also feel free to reply true for general friendly banter where a chill community manager would naturally jump in — you don't have to restrict yourself to only 3D/Blender topics. You can have normal casual conversations too, not just technical ones.\n` +
@@ -147,6 +197,9 @@ bot.on('text', async (ctx) => {
     userRecentChats[userId].push({ sender: userName, text: rawMessage });
     if (userRecentChats[userId].length > 15) userRecentChats[userId].shift();
 
+    // NEW: persist recent chat log immediately (cheap, keeps DB in sync even if batch engine hasn't run yet)
+    persistUserMemory(userId, userName).catch(() => {});
+
     // Push into global 5-second buffer queue (now carries reply/mention flags)
     chatBuffer.push({
         chatId,
@@ -179,8 +232,19 @@ setInterval(async () => {
     // --- NEW: hard override — if a direct reply/mention exists, don't fully trust the LLM's should_respond ---
     const hasDirectAddress = currentBatch.some(m => m.isReplyToBot || m.mentionsBot);
 
+    // --- NEW: build existing-memory context per user (identified by Telegram userId) so Groq UPDATES instead of overwriting ---
+    const uniqueUserIds = [...new Set(currentBatch.map(m => String(m.userId)))];
+    const existingMemoryContext = uniqueUserIds.map(uid => {
+        const core = userCoreMemory[uid] || "No prior core story recorded.";
+        const fresh = userFreshMemory[uid] || "No prior fresh memory.";
+        return `[UserID: ${uid}]\n  existing_core_story: "${core}"\n  existing_fresh_memory: "${fresh}"`;
+    }).join('\n');
+
     try {
-        const promptPayload = `CURRENT CHAT BATCH (Last 5 seconds):\n${formattedBatchText}`;
+        const promptPayload =
+            `EXISTING MEMORY FOR USERS IN THIS BATCH (matched by Telegram UserID — UPDATE/MERGE this, do NOT discard it):\n${existingMemoryContext}\n\n` +
+            `CURRENT CHAT BATCH (Last 5 seconds):\n${formattedBatchText}\n\n` +
+            `For each user's "core_story" in your output: start from their existing_core_story above and ADD/REFINE based on the new batch — never throw away previously known facts unless the new message directly contradicts them. "fresh_memory" can fully reflect just this latest batch.`;
 
         const completion = await groq.chat.completions.create({
             messages: [
@@ -204,6 +268,7 @@ setInterval(async () => {
                     if (update.core_story) userCoreMemory[update.userId] = update.core_story.trim();
                     if (update.fresh_memory) userFreshMemory[update.userId] = update.fresh_memory.trim();
                     await syncStructuredMemoryToTelegram(update.userId, update.userName || 'User');
+                    await persistUserMemory(update.userId, update.userName || 'User'); // NEW: save to DB
                 }
             }
         }
@@ -227,7 +292,17 @@ setInterval(async () => {
     }
 }, 5000);
 
-bot.launch().then(async () => {
+async function startBot() {
+    try {
+        await mongoose.connect(MONGODB_URI);
+        console.log("✅ MongoDB connected.");
+        await loadMemoryFromDB(); // NEW: restore all user data before accepting traffic
+    } catch (err) {
+        console.error("❌ MongoDB connection/load failed:", err.message);
+        process.exit(1);
+    }
+
+    await bot.launch();
     console.log("🚀 Autonomous 5s Batch Memory Engine Active...");
     try {
         const me = await bot.telegram.getMe();
@@ -235,7 +310,9 @@ bot.launch().then(async () => {
     } catch (e) {
         console.error("❌ Could not fetch bot identity:", e.message);
     }
-}).catch(err => console.error("❌ Launch Failed:", err.message));
+}
+
+startBot().catch(err => console.error("❌ Launch Failed:", err.message));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
