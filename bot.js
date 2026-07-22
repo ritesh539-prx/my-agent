@@ -16,9 +16,9 @@ if (!BOT_TOKEN || !GROQ_API_KEY) {
     process.exit(1);
 }
 if (!MONGODB_URI) {
-    console.error("❌ ERROR: MONGODB_URI is missing in .env! Data won't persist across restarts.");
-    process.exit(1);
+    console.warn("⚠️ MONGODB_URI not set — running in RAM-only mode. Data will NOT persist across restarts/redeploys.");
 }
+const DB_ENABLED = !!MONGODB_URI;
 
 // --- NEW: Mongo schema for per-user persistent memory ---
 const userMemorySchema = new mongoose.Schema({
@@ -50,8 +50,9 @@ const memoryMessageTracker = {};
 let chatBuffer = [];
 let botTelegramId = null; // filled after launch
 
-// --- NEW: load all existing user memory from MongoDB into RAM on boot ---
+// --- NEW: load all existing user memory from MongoDB into RAM on boot (skipped if DB disabled) ---
 async function loadMemoryFromDB() {
+    if (!DB_ENABLED) return;
     const allUsers = await UserMemory.find({});
     for (const doc of allUsers) {
         userCoreMemory[doc.userId] = doc.coreStory || `${doc.userName} joined group conversations.`;
@@ -62,8 +63,9 @@ async function loadMemoryFromDB() {
     console.log(`📦 Loaded memory for ${allUsers.length} user(s) from MongoDB.`);
 }
 
-// --- NEW: upsert a single user's memory into MongoDB (called after every update) ---
+// --- NEW: upsert a single user's memory into MongoDB (no-op if DB disabled) ---
 async function persistUserMemory(userId, userName) {
+    if (!DB_ENABLED) return;
     try {
         await UserMemory.findOneAndUpdate(
             { userId: String(userId) },
@@ -293,13 +295,16 @@ setInterval(async () => {
 }, 5000);
 
 async function startBot() {
-    try {
-        await mongoose.connect(MONGODB_URI);
-        console.log("✅ MongoDB connected.");
-        await loadMemoryFromDB(); // NEW: restore all user data before accepting traffic
-    } catch (err) {
-        console.error("❌ MongoDB connection/load failed:", err.message);
-        process.exit(1);
+    if (DB_ENABLED) {
+        try {
+            await mongoose.connect(MONGODB_URI);
+            console.log("✅ MongoDB connected.");
+            await loadMemoryFromDB(); // restore all user data before accepting traffic
+        } catch (err) {
+            console.error("❌ MongoDB connection/load failed — continuing in RAM-only mode:", err.message);
+        }
+    } else {
+        console.log("ℹ️ Starting in RAM-only mode (no MONGODB_URI set).");
     }
 
     await bot.launch();
